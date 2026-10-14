@@ -1,0 +1,91 @@
+
+import { test, expect } from '../fixtures';
+import { KpiRecorder } from '../../utils/kpi';
+import { runLighthouseAudit } from '../../utils/lighthouse';
+
+
+/**
+ * Journey: Amazon Addtocart
+ *
+ * Generated with named KPI timing, assigned via the journey builder UI.
+ * Automatically tracks pass/fail status, error messages, an E2E total
+ * (sum of all timed steps if passed, -1 if failed), and marks any
+ * in-progress step as -1 if the journey fails partway through.
+ */
+test.describe('Amazon Addtocart journey', () => {
+  test.setTimeout(90000); // Lighthouse audit (15-40 s) plus the journey's page loads
+
+  test('Amazon Addtocart', async ({ page }, testInfo) => {
+    const kpi = new KpiRecorder(testInfo, { siteId: 'amazon' });
+    let caughtError = null;
+
+    try {
+      kpi.start('TimeToLoadLaunchHomePage');
+      await page.goto('https://www.amazon.in/');
+      kpi.end('TimeToLoadLaunchHomePage');
+      const lighthouseResult = await runLighthouseAudit(page, 'homepage', kpi.getRunId());
+      kpi.addMetrics('lighthouse', lighthouseResult as unknown as Record<string, number>);
+
+      kpi.start('TimeToLoadClickSearchBox');
+      await page.getByRole('searchbox', { name: 'Search Amazon.in' }).click();
+      kpi.end('TimeToLoadClickSearchBox');
+      kpi.start('TimeToLoadFilledSearchItem');
+      await page.getByRole('searchbox', { name: 'Search Amazon.in' }).fill('iPhone 18 pro max');
+      kpi.end('TimeToLoadFilledSearchItem');
+      kpi.start('TimeToLoadOpenSearchedItems');
+      await page.getByRole('button', { name: 'Go', exact: true }).click();
+      kpi.end('TimeToLoadOpenSearchedItems');
+
+      // First organic result only. Sponsored slots change on every load, sit
+      // under carousels that block the click, and every click on an ad is
+      // billed to the advertiser.
+      const firstResult = page
+        .locator('[data-component-type="s-search-result"]:not(.AdHolder)')
+        .first();
+
+      kpi.start('TimeToLoadSelectItem');
+      // Amazon opens the product in a new tab or the same tab, depending on
+      // the layout it serves, so wait for whichever happens first.
+      const popup = page.waitForEvent('popup').catch(() => null);
+      const sameTab = page.waitForURL(/\/(dp|gp\/product)\//).then(() => page).catch(() => null);
+      await firstResult.locator('h2').first().click();
+      const page1 = await Promise.race([popup, sameTab]);
+      if (!page1) throw new Error('Product page did not open after clicking the first result');
+      await page1.locator('#productTitle').waitFor();
+      kpi.end('TimeToLoadSelectItem');
+
+      // After adding, Amazon shows either a side panel with a "Go to Cart"
+      // button or a confirmation page with a "Go to Cart" link. Waiting for
+      // either one is how we know the item was actually added.
+      const goToCart = page1
+        .getByRole('button', { name: /go to cart/i })
+        .or(page1.getByRole('link', { name: /go to cart/i }))
+        .first();
+
+      kpi.start('TimeToLoadAddToCart');
+      await page1.getByRole('button', { name: 'Add to cart' }).click();
+      await goToCart.waitFor();
+      kpi.end('TimeToLoadAddToCart');
+
+      kpi.start('TimeToLoadGoToCart');
+      await goToCart.click();
+      await page1.locator('#sc-active-cart').waitFor();
+      kpi.end('TimeToLoadGoToCart');
+    } catch (err) {
+      caughtError = err;
+      throw err;
+    } finally {
+      const metrics = kpi.getAll();
+      console.log('KPIs (ms):', metrics);
+      kpi.save('amazon-addtocart', {
+        status: caughtError ? 'failed' : 'passed',
+        errorMessage: caughtError ? caughtError.message : '',
+      });
+
+      await test.info().attach('kpi-metrics', {
+        body: JSON.stringify(metrics, null, 2),
+        contentType: 'application/json',
+      });
+    }
+  });
+});
